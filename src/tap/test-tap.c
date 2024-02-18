@@ -29,20 +29,8 @@ struct intfs_list_t {
     int intfs[128];
 };
 
-struct intfs_list_t cores2intfs[] = {
-    {     2,  {0,1},     },
-    {     2,  {0,1},     },
-    {     2,  {2,3},     },
-    {     2,  {2,3},     },
-    {     2,  {4,5},     },
-    {     2,  {4,5},     },
-    {     2,  {6,7},     },
-    {     2,  {6,7},     },
-};
 
-static int cores_per_intf[128] = {0};
-
-static struct rte_mempool *pktmbuf_pool_per_numa[16] = {NULL};
+static struct rte_mempool *pktmbuf_pool = NULL;
 static struct rte_mempool *pktmbuf_pool_capture = NULL;
 
 static int vlan_pair[2] = {1381, 1382};
@@ -56,16 +44,16 @@ static int capture = 0;
 static int port_init(uint16_t port)
 {
     struct rte_eth_conf port_conf;
-    const uint16_t rx_rings = cores_per_intf[port], tx_rings = cores_per_intf[port];
+    const uint16_t rx_rings = 1, tx_rings = 1;
     uint16_t nb_rxd = RX_RING_SIZE;
     uint16_t nb_txd = TX_RING_SIZE;
     int retval;
     uint16_t q;
     struct rte_eth_dev_info dev_info;
     struct rte_eth_txconf txconf;
-    int numaid = rte_eth_dev_socket_id(port);
+    int numaid = SOCKET_ID_ANY;
 
-    printf("PORT INIT %d: NUMA is %d\n", port, numaid);
+    printf("PORT INIT %d:\n", port);
 
     memset(&port_conf, 0, sizeof(struct rte_eth_conf));
 
@@ -94,7 +82,7 @@ static int port_init(uint16_t port)
 
     for(q = 0; q < rx_rings; q++) {
         printf("PORT INIT %d: rx Q %d: nb_rxd %d\n", port, q, nb_rxd);
-        retval = rte_eth_rx_queue_setup(port, q, nb_rxd, numaid, NULL, pktmbuf_pool_per_numa[numaid]);
+        retval = rte_eth_rx_queue_setup(port, q, nb_rxd, numaid, NULL, pktmbuf_pool);
         if(retval < 0) {
             return retval;
         }
@@ -134,20 +122,6 @@ static int port_init(uint16_t port)
     return 0;
 }
 
-static int is_intf_in_core(int port_id, int core_idx)
-{
-    struct intfs_list_t *intfinfo = &cores2intfs[core_idx];
-    int i;
-
-    for(i=0;i<intfinfo->cnt;i++){
-        if(intfinfo->intfs[i] == port_id){
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
 static RTE_DEFINE_PER_LCORE(int, intf_to_rss[128]);
 
 static int launch_one_lcore(__rte_unused void *dummy)
@@ -177,120 +151,27 @@ static int launch_one_lcore(__rte_unused void *dummy)
 
     printf("CORE IDX %d: CoreID %d on socket %d\n", core_idx, coreid, numaid);
 
-    intfinfo = &cores2intfs[core_idx];
-
-    for(i=0;i<intfinfo->cnt;i++){
-        curr_intf = intfinfo->intfs[i];
-
-        rss = 0;
-        for(j=0;j<core_idx;j++){
-            if(is_intf_in_core(curr_intf, j)){
-                rss++;
-            }
-        }
-
-        RTE_PER_LCORE(intf_to_rss[curr_intf]) = rss;
-
-        printf("CORE IDX %d: process interface %d on RSS %d\n", core_idx, curr_intf, RTE_PER_LCORE(intf_to_rss[curr_intf]));
-    }
-
-    sprintf(str, "capture-%d.pcapng", core_idx);
-    fd = open(str, O_RDWR | O_CREAT, 0666);
-    if(fd < 0){
-        printf("CORE IDX %d: open capture err\n", core_idx);
-        return 0;
-    }
-
-    pcapng_fd[core_idx] = rte_pcapng_fdopen(fd, NULL, NULL, NULL, NULL);
-    if (!pcapng_fd[core_idx]) {
-        printf("CORE IDX %d: rte_pcapng_fdopen err\n", core_idx);
-        return 0;
-    }
-
-    ret = rte_pcapng_add_interface(pcapng_fd[core_idx], 0, NULL, NULL, NULL);
-    if (ret < 0) {
-        printf("CORE IDX %d: rte_pcapng_add_interface err\n", core_idx);
-        return 0;
-    }
-
     while(1){
 
         time0 = rte_rdtsc();
 
         ms_curr = time0 * 1000ULL / tsc_per_sec;
 
-        for(i=0;i<intfinfo->cnt;i++){
-            curr_intf = intfinfo->intfs[i];
-            rss = RTE_PER_LCORE(intf_to_rss[curr_intf]);
-            busy = 0;
-
-            time1 = rte_rdtsc();
-            nb_rx = rte_eth_rx_burst(curr_intf, rss, bufs, BURST_SIZE);
-            if(likely(nb_rx)){
-                busy = 1;
-
-                // printf("CORE IDX %d: interface %d RSS %d rcv pkts %d\n", core_idx, curr_intf, rss, nb_rx);
-
-                for(k=0;k<nb_rx;k++){
-
-                    if(unlikely(capture)){
-                        mc = rte_pcapng_copy(0, 0, bufs[k], pktmbuf_pool_capture, bufs[k]->pkt_len, 0, NULL);
-                        if (mc){
-                            mbuf_clones[0] = mc;
-                            ret = rte_pcapng_write_packets(pcapng_fd[core_idx], mbuf_clones, 1);
-                            rte_pktmbuf_free_bulk(mbuf_clones, 1);
-                        }
-                    }
-/*
-                    rte_get_ptype_name(bufs[k]->packet_type, str, sizeof(str));
-                    printf("%s\n", str);
-                    rte_pktmbuf_dump(stdout, bufs[k], bufs[k]->pkt_len);
-*/
-                    eh = rte_pktmbuf_mtod(bufs[k], struct rte_ether_hdr *);
-                    if (eh->ether_type == rte_cpu_to_be_16(RTE_ETHER_TYPE_VLAN)){
-                        vh = (struct rte_vlan_hdr *)(eh + 1);
-                        // printf("----- VLAN %d\n", rte_cpu_to_be_16(vh->vlan_tci));
-                        if(rte_cpu_to_be_16(vh->vlan_tci) == vlan_pair[0]){
-                            vh->vlan_tci = rte_cpu_to_be_16(vlan_pair[1]);
-                        }else if(rte_cpu_to_be_16(vh->vlan_tci) == vlan_pair[1]){
-                            vh->vlan_tci = rte_cpu_to_be_16(vlan_pair[0]);
-                        }
-                    }else{
-                    }
-                }
-
-                nb_tx = rte_eth_tx_burst(curr_intf, rss, bufs, nb_rx);
-
-                if(unlikely(capture)){
-                    for(k=0;k<nb_tx;k++){
-                        mc = rte_pcapng_copy(0, 0, bufs[k], pktmbuf_pool_capture, bufs[k]->pkt_len, 0, NULL);
-                        if (mc){
-                            mbuf_clones[0] = mc;
-                            ret = rte_pcapng_write_packets(pcapng_fd[core_idx], mbuf_clones, 1);
-                            rte_pktmbuf_free_bulk(mbuf_clones, 1);
-                        }
-                    }
-                }
-
+        for(i=0;i<g_intf_cnt;i++){
+            nb_rx = rte_eth_rx_burst(i, 0, bufs, BURST_SIZE);
+            if(nb_rx){
+                nb_tx = rte_eth_tx_burst((i == 1) ? 0 : 1, 0, bufs, nb_rx);
                 if (unlikely(nb_tx < nb_rx)) {
                     for (k = nb_tx; k < nb_rx; k++){
                         rte_pktmbuf_free(bufs[k]);
                     }
                 }
             }
-            if(busy){
-                time_work += rte_rdtsc() - time1;
-            }
         }
 
-        time_all += rte_rdtsc() - time0;
-
         if(ms_curr - ms_last > 5000){
-            cpu = (time_work - time_work_last) * 100ULL / (time_all - time_all_last);
-            printf("CORE IDX %d: s %llu cpu %d\n", core_idx, ms_curr / 1000, cpu);
+
             ms_last = ms_curr;
-            time_work_last = time_work;
-            time_all_last = time_all;
 
             if(core_idx == 0){
                 for(i=0;i<g_intf_cnt;i++){
@@ -343,30 +224,16 @@ int main(int argc, char *argv[])
     g_intf_cnt = rte_eth_dev_count_avail();
     printf("Intfs %d\n", g_intf_cnt);
 
-    for(i=0;i<sizeof(cores2intfs)/sizeof(cores2intfs[0]);i++){
-        intfs = &cores2intfs[i];
-        for(j=0;j<intfs->cnt;j++){
-            cores_per_intf[intfs->intfs[j]]++;
-        }
-    }
-
-    for(i=0;i<g_numa_cnt;i++){
-        sprintf(buff, "pktmbuf_per_numa_%d", i);
-        pktmbuf_pool_per_numa[i] = rte_pktmbuf_pool_create(buff, 65535, MEMPOOL_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, i);
-        if(pktmbuf_pool_per_numa[i]){
-            printf("rte_pktmbuf_pool_create for NUMA %d OK\n", i);
-        }else{
-            rte_exit(EXIT_FAILURE, "rte_pktmbuf_pool_create %d\n", i);
-        }
+    pktmbuf_pool = rte_pktmbuf_pool_create(buff, 65535, MEMPOOL_CACHE_SIZE, 0, RTE_MBUF_DEFAULT_BUF_SIZE, SOCKET_ID_ANY);
+    if(pktmbuf_pool){
+        printf("rte_pktmbuf_pool_create OK\n");
+    }else{
+        rte_exit(EXIT_FAILURE, "rte_pktmbuf_pool_create\n");
     }
 
     pktmbuf_pool_capture = rte_pktmbuf_pool_create("capture", 65535, MEMPOOL_CACHE_SIZE, 0, rte_pcapng_mbuf_size(RTE_MBUF_DEFAULT_BUF_SIZE), SOCKET_ID_ANY);
     if(!pktmbuf_pool_capture){
         rte_exit(EXIT_FAILURE, "pktmbuf_pool_capture fail\n");
-    }
-
-    RTE_ETH_FOREACH_DEV(portid){
-        printf("Interface %d on socket %d has cores %d\n", portid, rte_eth_dev_socket_id(portid), cores_per_intf[portid]);
     }
 
     RTE_ETH_FOREACH_DEV(portid){
