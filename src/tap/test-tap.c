@@ -113,11 +113,7 @@ static int port_init(uint16_t port)
 
     printf("PORT INIT %d: MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n", port, RTE_ETHER_ADDR_BYTES(&addr));
 
-    retval = rte_eth_promiscuous_enable(port);
-
-    if(retval != 0) {
-        return retval;
-    }
+    rte_eth_promiscuous_enable(port);
 
     return 0;
 }
