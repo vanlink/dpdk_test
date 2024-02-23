@@ -80,6 +80,9 @@ static int port_init(uint16_t port)
         printf("PORT INIT %d: RTE_ETH_TX_OFFLOAD_MBUF_FAST_FREE\n", port);
     }
 
+    port_conf.rxmode.mq_mode = RTE_ETH_MQ_RX_RSS;
+    port_conf.rx_adv_conf.rss_conf.rss_hf = RTE_ETH_RSS_NONFRAG_IPV4_TCP;
+
     printf("PORT INIT %d: tx rx Q cnt %d\n", port, rx_rings);
     retval = rte_eth_dev_configure(port, rx_rings, tx_rings, &port_conf);
     if(retval != 0) {
@@ -125,7 +128,11 @@ static int port_init(uint16_t port)
 
     printf("PORT INIT %d: MAC: %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 " %02" PRIx8 "\n", port, RTE_ETHER_ADDR_BYTES(&addr));
 
-    rte_eth_promiscuous_enable(port);
+    retval = rte_eth_promiscuous_enable(port);
+
+    if(retval != 0) {
+        return retval;
+    }
 
     return 0;
 }
@@ -292,7 +299,7 @@ static int launch_one_lcore(__rte_unused void *dummy)
                 for(i=0;i<g_intf_cnt;i++){
                     memset(&stats, 0, sizeof(stats));
                     rte_eth_stats_get(i, &stats);
-                    printf("INTF %d: %llu/%llu %llu %llu %llu %llu\n", i, stats.ipackets, stats.opackets, stats.imissed, stats.rx_nombuf, stats.ierrors, stats.oerrors);
+                    printf("INTF %d: %llu/%llu %llu %llu %llu %llu\n", i, stats.ibytes, stats.obytes, stats.imissed, stats.rx_nombuf, stats.ierrors, stats.oerrors);
                 }
             }
 
